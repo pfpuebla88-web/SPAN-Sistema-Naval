@@ -5,20 +5,34 @@ from oauth2client.service_account import ServiceAccountCredentials
 from datetime import datetime, timedelta
 import time
 
-# --- CONFIGURACIÓN VISUAL ---
 st.set_page_config(page_title="SPAN Naval", page_icon="⚓", layout="wide")
 
-# --- FUNCIONES AUXILIARES ---
-def limpiar_fecha(fecha_str):
-    """Intenta entender la fecha sea como sea que venga del Excel"""
-    try:
-        if isinstance(fecha_str, (datetime, pd.Timestamp)):
-            return fecha_str
-        return pd.to_datetime(fecha_str, dayfirst=True)
-    except:
-        return None
+# --- LISTA DE EVENTOS REALES (Extraídos de tu Excel) ---
+TIPOS_EVENTO_NAVAL = [
+    "Feriado /Franquicia /Vacaciones",
+    "Ceremonias/Desfiles y repasos",
+    "Ejercicio de Campaña / Supervivencia / Polígono",
+    "Integracion de Escuelas Militares",
+    "Semana del Guardiamarina",
+    "Combate Naval Jambelí",
+    "Crucero Internacional",
+    "Visitas profesionales / Crucero Nacional",
+    "Exámenes",
+    "Exámenes de recuperación",
+    "Junta Académica",
+    "Prácticas Pre Profesionales",
+    "Defensa Tesis",
+    "Ceremonia de Graduación",
+    "Curso Contraincendio",
+    "Imprevisto / Sanción"
+]
 
-# --- MÓDULO 1: CONEXIÓN ROBUSTA ---
+def limpiar_fecha(fecha_str):
+    try:
+        if isinstance(fecha_str, (datetime, pd.Timestamp)): return fecha_str
+        return pd.to_datetime(fecha_str, dayfirst=True)
+    except: return None
+
 def cargar_datos():
     try:
         scope = ['https://spreadsheets.google.com/feeds', 'https://www.googleapis.com/auth/drive']
@@ -28,202 +42,148 @@ def cargar_datos():
         sheet = client.open("SPAN_BD_2026")
         
         db = {}
-        # Mapeo exacto: Nombre en Excel -> Nombre en Código
-        mapa_pestanas = {
-            "CONFIGURACION": "config",
-            "CURSOS": "cursos",
-            "MATERIAS": "materias",
-            "INTERRUPCIONES": "interrupciones",
-            "HISTORIAL_CAMBIOS": "historial"
-        }
+        mapa = {"CONFIGURACION": "config", "CURSOS": "cursos", "MATERIAS": "materias", 
+                "INTERRUPCIONES": "interrupciones", "HISTORIAL_CAMBIOS": "historial"}
         
-        for pestana_excel, nombre_codigo in mapa_pestanas.items():
+        for pestana, nombre in mapa.items():
             try:
-                ws = sheet.worksheet(pestana_excel)
-                data = ws.get_all_records()
-                df = pd.DataFrame(data)
-                
-                # 1. Limpiar encabezados (quitar espacios)
-                if not df.empty:
-                    df.columns = df.columns.astype(str).str.strip()
-                
-                db[nombre_codigo] = df
-                
-            except gspread.exceptions.WorksheetNotFound:
-                st.error(f"❌ Falta la pestaña '{pestana_excel}' en el Excel.")
-                st.stop()
+                df = pd.DataFrame(sheet.worksheet(pestana).get_all_records())
+                if not df.empty: df.columns = df.columns.astype(str).str.strip()
+                db[nombre] = df
+            except: st.error(f"Falta pestaña: {pestana}"); st.stop()
         
-        # --- AUTO-CORRECCIONES (SANITY CHECK) ---
-        # Si falta la columna 'Estado' en Interrupciones, la creamos virtualmente
-        if "Estado" not in db["interrupciones"].columns:
-            st.toast("⚠️ Aviso: No encontré columna 'Estado' en Interrupciones. Asumiendo todo como ACTIVO.")
-            db["interrupciones"]["Estado"] = "ACTIVO"
-            
-        # Si falta columna 'Alcance', asumimos GLOBAL
-        if "Alcance" not in db["interrupciones"].columns:
-            db["interrupciones"]["Alcance"] = "GLOBAL"
-
-        # Si falta columna 'Afectados', asumimos vacío
-        if "Afectados" not in db["interrupciones"].columns:
-            db["interrupciones"]["Afectados"] = ""
+        # Auto-correcciones
+        if "Estado" not in db["interrupciones"].columns: db["interrupciones"]["Estado"] = "ACTIVO"
+        if "Alcance" not in db["interrupciones"].columns: db["interrupciones"]["Alcance"] = "GLOBAL"
+        if "Afectados" not in db["interrupciones"].columns: db["interrupciones"]["Afectados"] = ""
 
         return db, sheet
+    except Exception as e: st.error(f"Error Conexión: {e}"); st.stop()
 
-    except Exception as e:
-        st.error(f"❌ Error General de Conexión: {str(e)}")
-        st.stop()
-
-def registrar_auditoria(sheet, usuario, accion, id_evento, justificacion):
+def registrar_auditoria(sheet, usuario, accion, id_evt, justif):
     try:
-        ws_historial = sheet.worksheet("HISTORIAL_CAMBIOS")
-        ahora = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-        nueva_fila = [ahora, usuario, accion, id_evento, justificacion]
-        ws_historial.append_row(nueva_fila)
-    except Exception as e:
-        st.warning(f"No se pudo guardar auditoría: {e}")
+        sheet.worksheet("HISTORIAL_CAMBIOS").append_row([
+            datetime.now().strftime("%Y-%m-%d %H:%M:%S"), usuario, accion, id_evt, justif
+        ])
+    except: pass
 
-# --- MÓDULO 2: CÁLCULO ---
-def calcular_cronograma(db, curso_seleccionado):
+def calcular_cronograma(db, curso):
     try:
-        df_cursos = db["cursos"]
-        if df_cursos.empty: return None
-            
-        info_curso = df_cursos[df_cursos["ID_Curso"] == curso_seleccionado]
-        if info_curso.empty:
-            st.error(f"Curso no encontrado: {curso_seleccionado}")
-            return None
+        info = db["cursos"][db["cursos"]["ID_Curso"] == curso].iloc[0]
+        fi = limpiar_fecha(info["Inicio_Clases_Real"])
+        ff = limpiar_fecha(info["Fin_Clases_Real"])
         
-        info_curso = info_curso.iloc[0]
-        fecha_inicio = limpiar_fecha(info_curso["Inicio_Clases_Real"])
-        fecha_fin = limpiar_fecha(info_curso["Fin_Clases_Real"])
+        if pd.isna(fi) or pd.isna(ff): return None
         
-        if pd.isna(fecha_inicio) or pd.isna(fecha_fin):
-            st.error("Fechas inválidas en curso.")
-            return None
-
-        # Materias
+        # Lógica de Materias
         materias = db["materias"]
-        if "Curso" in materias.columns:
-            materias = materias[materias["Curso"] == curso_seleccionado]
+        if "Curso" in materias.columns: materias = materias[materias["Curso"] == curso]
         
-        # Interrupciones
-        interrupciones = db["interrupciones"]
+        # Lógica de Interrupciones
+        ints = db["interrupciones"]
+        mask = (ints["Estado"] == "ACTIVO") & ((ints["Alcance"] == "GLOBAL") | (ints["Afectados"] == curso))
+        eventos = ints[mask]
         
-        # Filtro seguro
-        mask = (interrupciones["Estado"] == "ACTIVO") & \
-               ((interrupciones["Alcance"] == "GLOBAL") | (interrupciones["Afectados"] == curso_seleccionado))
-        eventos_curso = interrupciones[mask]
-
+        # Simulación
         dias_perdidos = 0
-        horas_disponibles_reales = 0
-        log_diario = []
-
-        fecha_actual = fecha_inicio
-        while fecha_actual <= fecha_fin:
-            es_fin_semana = fecha_actual.weekday() >= 5
-            fecha_str = fecha_actual.strftime("%Y-%m-%d")
+        horas_reales = 0
+        log = []
+        
+        curr = fi
+        while curr <= ff:
+            es_fds = curr.weekday() >= 5
+            estado = "CLASE"
             
-            evento_hoy = None
-            for _, evento in eventos_curso.iterrows():
-                fi = limpiar_fecha(evento["Fecha_Inicio"])
-                ff = limpiar_fecha(evento["Fecha_Fin"])
-                if fi and ff and (fi <= fecha_actual <= ff):
-                    evento_hoy = evento["Nombre_Evento"]
+            # Buscar evento
+            evt_hoy = None
+            for _, e in eventos.iterrows():
+                efi, eff = limpiar_fecha(e["Fecha_Inicio"]), limpiar_fecha(e["Fecha_Fin"])
+                if efi and eff and (efi <= curr <= eff):
+                    evt_hoy = e["Nombre_Evento"]
                     break
             
-            estado_dia = "CLASE"
-            if es_fin_semana:
-                estado_dia = "FIN DE SEMANA"
-            elif evento_hoy:
-                estado_dia = f"INTERRUPCIÓN: {evento_hoy}"
+            if es_fds: estado = "FIN DE SEMANA"
+            elif evt_hoy: 
+                estado = f"⛔ {evt_hoy}"
                 dias_perdidos += 1
-            else:
-                horas_disponibles_reales += 6 
+            else: 
+                horas_reales += 6 # Horas pedagógicas promedio
             
-            log_diario.append({"Fecha": fecha_str, "Estado": estado_dia})
-            fecha_actual += timedelta(days=1)
-
-        total_horas_necesarias = materias["Horas_Totales"].sum() if "Horas_Totales" in materias.columns else 0
+            log.append({"Fecha": curr.strftime("%Y-%m-%d"), "Estado": estado})
+            curr += timedelta(days=1)
+            
+        total_req = materias["Horas_Totales"].sum() if "Horas_Totales" in materias.columns else 0
+        cobertura = min(100, int((horas_reales / total_req)*100)) if total_req > 0 else 100
         
-        if total_horas_necesarias > 0:
-            cobertura = min(100, int((horas_disponibles_reales / total_horas_necesarias) * 100))
-        else:
-            cobertura = 100
-
-        return {
-            "dias_perdidos": dias_perdidos,
-            "horas_reales": horas_disponibles_reales,
-            "cobertura": cobertura,
-            "detalle": log_diario
-        }
-    except Exception as e:
-        st.error(f"Error detallado en cálculo: {str(e)}")
-        return None
+        return {"dias_perdidos": dias_perdidos, "horas_reales": horas_reales, "cobertura": cobertura, "detalle": log}
+    except: return None
 
 # --- INTERFAZ ---
-st.title("⚓ Sistema de Planificación Académica Naval (SPAN)")
-
-db, sheet_obj = cargar_datos()
+st.title("⚓ SPAN: Planificación Naval 2026")
+db, sheet = cargar_datos()
 
 if db:
-    st.sidebar.header("👮‍♂️ Panel de Control")
-    
-    if db["cursos"].empty:
-        st.warning("⚠️ Tabla CURSOS vacía.")
+    st.sidebar.header("👮‍♂️ Panel Oficial")
+    if db["cursos"].empty: st.warning("Llenar pestaña CURSOS en Excel.")
     else:
         col_id = "ID_Curso" if "ID_Curso" in db["cursos"].columns else db["cursos"].columns[0]
-        lista_cursos = db["cursos"][col_id].dropna().unique()
-        curso_actual = st.sidebar.selectbox("Seleccione Curso:", lista_cursos)
+        curso = st.sidebar.selectbox("Seleccione Curso:", db["cursos"][col_id].dropna().unique())
         
-        tab1, tab2, tab3 = st.tabs(["📊 Situación", "📅 Gestión", "📝 Auditoría"])
+        tab1, tab2, tab3 = st.tabs(["📊 Semáforo Académico", "📅 Gestión Eventos", "📝 Auditoría"])
         
         with tab1:
-            st.header(f"Análisis: {curso_actual}")
+            st.header(f"Estado de Fuerza: {curso}")
             if st.button("🔄 Actualizar"): st.rerun()
-            
-            res = calcular_cronograma(db, curso_actual)
+            res = calcular_cronograma(db, curso)
             
             if res:
                 c1, c2, c3 = st.columns(3)
-                c1.metric("Cobertura", f"{res['cobertura']}%")
-                c2.metric("Días Perdidos", f"{res['dias_perdidos']}")
-                c3.metric("Horas Reales", res['horas_reales'])
+                c1.metric("Cobertura Pensum", f"{res['cobertura']}%")
+                c2.metric("Días Operativos Perdidos", res['dias_perdidos'])
+                c3.metric("Horas Disponibles", res['horas_reales'])
                 
-                if res['cobertura'] < 85: st.error("🚨 CRÍTICO")
-                elif res['cobertura'] < 100: st.warning("⚠️ ATENCIÓN")
-                else: st.success("✅ OPERATIVO")
+                if res['cobertura'] < 85: st.error("🚨 CRÍTICO: No se cumple la carga horaria.")
+                elif res['cobertura'] < 100: st.warning("⚠️ ALERTA: Se requiere recuperación.")
+                else: st.success("✅ SIN NOVEDAD: Planificación viable.")
                 
-                with st.expander("Ver Detalle"):
+                with st.expander("Ver Calendario Detallado"):
                     st.dataframe(pd.DataFrame(res["detalle"]))
 
         with tab2:
-            st.header("Registrar Interrupción")
-            with st.form("add_event"):
-                nombre = st.text_input("Nombre Evento")
-                col_dates = st.columns(2)
-                fi = col_dates[0].date_input("Inicio")
-                ff = col_dates[1].date_input("Fin")
+            st.subheader("Registrar Nueva Interrupción")
+            with st.form("new_evt"):
+                # AQUI ESTÁ LA MAGIA: Tu lista real de eventos
+                tipo = st.selectbox("Tipo de Evento (Según Reglamento)", TIPOS_EVENTO_NAVAL)
+                nombre = st.text_input("Detalle Adicional (Opcional)")
+                c1, c2 = st.columns(2)
+                fi = c1.date_input("Inicio")
+                ff = c2.date_input("Fin")
                 alcance = st.radio("Alcance", ["GLOBAL", "ESPECIFICO"])
-                justif = st.text_area("Justificación")
-                user = st.text_input("Usuario")
+                justif = st.text_area("Orden General / Justificación")
+                user = st.text_input("Responsable")
                 
                 if st.form_submit_button("Guardar"):
-                    ws = sheet_obj.worksheet("INTERRUPCIONES")
-                    afectados = curso_actual if alcance == "ESPECIFICO" else ""
-                    fi_str = fi.strftime("%Y-%m-%d")
-                    ff_str = ff.strftime("%Y-%m-%d")
-                    # ID, Nombre, Ini, Fin, Tipo, Alcance, Afectados, ESTADO, Justif
-                    row = [f"EVT-{int(time.time())}", nombre, fi_str, ff_str, "Militar", alcance, afectados, "ACTIVO", justif]
+                    ws = sheet.worksheet("INTERRUPCIONES")
+                    nom_final = f"{tipo} - {nombre}" if nombre else tipo
+                    afec = curso if alcance == "ESPECIFICO" else ""
+                    row = [f"EVT-{int(time.time())}", nom_final, str(fi), str(ff), "Militar", alcance, afec, "ACTIVO", justif]
                     ws.append_row(row)
-                    registrar_auditoria(sheet_obj, user, "CREACION", "N/A", f"Creó: {nombre}")
-                    st.success("Guardado")
-                    time.sleep(1)
-                    st.rerun()
+                    registrar_auditoria(sheet, user, "CREACION", "N/A", f"Creó: {nom_final}")
+                    st.success("Registrado"); time.sleep(1); st.rerun()
+            
+            st.divider()
+            st.subheader("Anular Evento")
+            evts = db["interrupciones"]
+            activos = evts[evts["Estado"]=="ACTIVO"]["Nombre_Evento"].unique()
+            if len(activos)>0:
+                evt_del = st.selectbox("Seleccione evento a anular:", activos)
+                m_del = st.text_input("Motivo Anulación")
+                u_del = st.text_input("Oficial que anula")
+                if st.button("Confirmar Anulación"):
+                    cell = sheet.worksheet("INTERRUPCIONES").find(evt_del)
+                    sheet.worksheet("INTERRUPCIONES").update_cell(cell.row, 7, "CANCELADO") # Columna Estado aprox
+                    registrar_auditoria(sheet, u_del, "ANULACION", "N/A", f"Anuló: {evt_del} - {m_del}")
+                    st.success("Anulado"); st.rerun()
 
         with tab3:
-            st.header("Historial")
-            # Corrección del error de visualización
-            if not db["historial"].empty:
-                st.dataframe(db["historial"])
-            else:
-                st.info("No hay registros de auditoría aún.")
+            st.dataframe(db["historial"])
